@@ -165,6 +165,7 @@ struct tcphdr {
 #define	TCP_KEEPIDLE	256	/* L,N,X start keeplives after this period */
 #define	TCP_KEEPINTVL	512	/* L,N interval between keepalives */
 #define	TCP_KEEPCNT	1024	/* L,N number of keepalives before close */
+#define	TCP_INNERSPC	2048	/* use inner-space options parser */
 
 /* Start of reserved space for third-party user-settable options. */
 #define	TCP_VENDOR	SO_VENDOR

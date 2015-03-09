@@ -867,6 +867,9 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 #endif
 		if (sc->sc_flags & SCF_SACK)
 			tp->t_flags |= TF_SACK_PERMIT;
+
+		if (sc->sc_flags & SCF_INSPC)
+			tp->t_flags2 |= TF2_INSPC;
 	}
 
 	if (sc->sc_flags & SCF_ECN)
@@ -1332,6 +1335,8 @@ syncache_add(struct in_conninfo *inc, struct tcpopt *to, struct tcphdr *th,
 #endif
 	if (to->to_flags & TOF_SACKPERM)
 		sc->sc_flags |= SCF_SACK;
+	if (to->to_flags & TOF_INSPC)
+		sc->sc_flags |= SCF_INSPC;
 	if (to->to_flags & TOF_MSS)
 		sc->sc_peer_mss = to->to_mss;	/* peer mss may be zero */
 	if (ltflags & TF_NOOPT)
@@ -1506,6 +1511,9 @@ syncache_respond(struct syncache *sc, struct syncache_head *sch, int locked)
 		}
 		if (sc->sc_flags & SCF_SACK)
 			to.to_flags |= TOF_SACKPERM;
+
+		if (sc->sc_flags & SCF_INSPC)
+			to.to_flags |= TOF_INSPC;
 #ifdef TCP_SIGNATURE
 		sav = NULL;
 		if (sc->sc_flags & SCF_SIGNATURE) {

@@ -1422,6 +1422,21 @@ unlock_and_done:
 			}
 			goto unlock_and_done;
 
+		case TCP_INNERSPC:
+			INP_WUNLOCK(inp);
+			error = sooptcopyin(sopt, &optval, sizeof optval,
+			    sizeof optval);
+			if (error)
+				return (error);
+
+			INP_WLOCK_RECHECK(inp);
+			if (optval)
+				tp->t_flags2 |= TF2_INSPC;
+			else if (tp->t_flags2 & TF2_INSPC) {
+				tp->t_flags2 &= ~TF2_INSPC;
+			}
+			goto unlock_and_done;
+
 		case TCP_MAXSEG:
 			INP_WUNLOCK(inp);
 			error = sooptcopyin(sopt, &optval, sizeof optval,

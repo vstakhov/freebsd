@@ -284,6 +284,7 @@ struct tcpcb {
 #define	TF2_PLPMTU_BLACKHOLE	0x00000001 /* Possible PLPMTUD Black Hole. */
 #define	TF2_PLPMTU_PMTUD	0x00000002 /* Allowed to attempt PLPMTUD. */
 #define	TF2_PLPMTU_MAXSEGSNT	0x00000004 /* Last seg sent was full seg. */
+#define	TF2_INSPC		0x00000008 /* InnerSpace enabled. */
 
 /*
  * Structure to hold TCP options that are only used during segment
@@ -301,7 +302,8 @@ struct tcpopt {
 #define	TOF_TS		0x0010		/* timestamp */
 #define	TOF_SIGNATURE	0x0040		/* TCP-MD5 signature option (RFC2385) */
 #define	TOF_SACK	0x0080		/* Peer sent SACK option */
-#define	TOF_MAXOPT	0x0100
+#define TOF_INSPC	0x0100		/* Inner Space enabled */
+#define	TOF_MAXOPT	0x0200
 	u_int32_t	to_tsval;	/* new timestamp */
 	u_int32_t	to_tsecr;	/* reflected timestamp */
 	u_char		*to_sacks;	/* pointer to the first SACK blocks */
@@ -379,6 +381,12 @@ struct tcptw {
 #define	TCP_RTTVAR_SCALE	16	/* multiplier for rttvar; 2 bits */
 #define	TCP_RTTVAR_SHIFT	4	/* shift for rttvar; 2 bits */
 #define	TCP_DELTA_SHIFT		2	/* see tcp_input.c */
+
+/*
+ * Inner Space magic constants
+ */
+#define	TCP_INSPC_MAGICA	0x7f38	/* XXX: non standard */
+#define	TCP_INSPC_MAGICB	0x2801	/* XXX: non standard */
 
 /*
  * The initial retransmission should happen at rtt + 4 * rttvar.

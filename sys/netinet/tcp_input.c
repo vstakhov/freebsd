@@ -226,6 +226,8 @@ VNET_DEFINE(struct inpcbhead, tcb);
 VNET_DEFINE(struct inpcbinfo, tcbinfo);
 
 static void	 tcp_dooptions(struct tcpopt *, u_char *, int, int);
+static void	 tcp_doinspc(struct tcpopt *, u_char *, struct tcpcb *, int *,
+		     int*, int);
 static void	 tcp_do_segment(struct mbuf *, struct tcphdr *,
 		     struct socket *, struct tcpcb *, int, int, uint8_t,
 		     int, struct tcpopt *);
@@ -584,6 +586,7 @@ tcp_input(struct mbuf **mp, int *offp, int proto)
 	struct tcpcb *tp = NULL;
 	struct socket *so = NULL;
 	u_char *optp = NULL;
+	u_char *payp = NULL;
 	int off0;
 	int optlen = 0;
 #ifdef INET
@@ -777,6 +780,8 @@ tcp_input(struct mbuf **mp, int *offp, int proto)
 		optlen = off - sizeof (struct tcphdr);
 		optp = (u_char *)(th + 1);
 	}
+
+	payp = ((u_char *)(th + 1)) + optlen;
 	thflags = th->th_flags;
 
 	/*
@@ -983,9 +988,13 @@ relocked:
 				ti_locked = TI_WLOCKED;
 		}
 		INP_INFO_WLOCK_ASSERT(&V_tcbinfo);
-
-		if (thflags & TH_SYN)
-			tcp_dooptions(&to, optp, optlen, TO_SYN);
+		
+		if (thflags & TH_SYN) {
+			tcp_doinspc(&to, payp, NULL, &tlen, &drop_hdrlen,
+			    (thflags & TH_SYN) ? TO_SYN : 0);
+			tcp_dooptions(&to, optp, optlen,
+			    (thflags & TH_SYN) ? TO_SYN : 0);
+		}
 		/*
 		 * NB: tcp_twcheck unlocks the INP and frees the mbuf.
 		 */
@@ -1102,6 +1111,8 @@ relocked:
 			 * syncookies need access to the reflected
 			 * timestamp.
 			 */
+			tcp_doinspc(&to, payp, NULL, &tlen, &drop_hdrlen,
+			    (thflags & TH_SYN) ? TO_SYN : 0);
 			tcp_dooptions(&to, optp, optlen, 0);
 			/*
 			 * NB: syncache_expand() doesn't unlock
@@ -1154,6 +1165,8 @@ relocked:
 			    ("%s: ", __func__));
 #ifdef TCP_SIGNATURE
 			if (sig_checked == 0)  {
+				tcp_doinspc(&to, payp, tp, &tlen, &drop_hdrlen,
+				    (thflags & TH_SYN) ? TO_SYN : 0);
 				tcp_dooptions(&to, optp, optlen,
 				    (thflags & TH_SYN) ? TO_SYN : 0);
 				if (!tcp_signature_verify_input(m, off0, tlen,
@@ -1373,6 +1386,7 @@ relocked:
 			tcp_trace(TA_INPUT, ostate, tp,
 			    (void *)tcp_saveipgen, &tcp_savetcp, 0);
 #endif
+		tcp_doinspc(&to, payp, NULL, &tlen, &drop_hdrlen, TO_SYN);
 		tcp_dooptions(&to, optp, optlen, TO_SYN);
 		syncache_add(&inc, &to, th, inp, &so, m, NULL, NULL);
 		/*
@@ -1398,6 +1412,8 @@ relocked:
 
 #ifdef TCP_SIGNATURE
 	if (sig_checked == 0)  {
+		tcp_doinspc(&to, payp, tp, &tlen, &drop_hdrlen,
+		    (thflags & TH_SYN) ? TO_SYN : 0);
 		tcp_dooptions(&to, optp, optlen,
 		    (thflags & TH_SYN) ? TO_SYN : 0);
 		if (!tcp_signature_verify_input(m, off0, tlen, optlen, &to,
@@ -1420,6 +1436,8 @@ relocked:
 	/*
 	 * Parse options on any incoming segment.
 	 */
+	tcp_doinspc(&to, payp, tp, &tlen, &drop_hdrlen,
+	    (thflags & TH_SYN) ? TO_SYN : 0);
 	tcp_dooptions(&to, optp, optlen, (thflags & TH_SYN) ? TO_SYN : 0);
 
 	/*
@@ -3256,6 +3274,73 @@ tcp_dooptions(struct tcpopt *to, u_char *cp, int cnt, int flags)
 			break;
 		default:
 			continue;
+		}
+	}
+}
+
+static int
+tcp_inspc_validate(u_char *opt, int *tlen, int *inoff)
+{
+	uint16_t nspc, ino;
+	int plen;
+
+	plen = *tlen;
+	bcopy(opt, &nspc, sizeof(nspc));
+	bcopy(opt + 2, &ino, sizeof(ino));
+	nspc = ntohs(nspc);
+	ino = ntohs(ino >> 2);
+
+	if (ino * 4 + nspc > plen)
+		return (-1);
+
+	*tlen = plen;
+	*inoff = ino;
+
+	return (0);
+}
+
+/*
+ * Check and parse TCP inner space options from a tcp packet
+ */
+static void
+tcp_doinspc(struct tcpopt *to, u_char *cp, struct tcpcb *tp, int *tlen,
+    int *drop_hdrlen, int flags)
+{
+	int plen, inoff;
+	uint16_t m1, m2;
+
+	plen = *tlen;
+	
+	/* Ignore packets with no payload */
+	if (plen == 0)
+		return;
+
+	if (flags & TO_SYN) {
+		/* Parse SYN type of InnerSpace option */
+		if (plen >= sizeof(uint32_t) * 3) {
+			/* Validate magic A and magic B */
+			bcopy(cp, &m1, sizeof(uint16_t));
+			bcopy(cp + 6, &m2, sizeof(uint16_t));
+			m1 = ntohs(m1);
+			m2 = ntohs(m2);
+
+			if (m1 == TCP_INSPC_MAGICA && m2 == TCP_INSPC_MAGICB &&
+			    tcp_inspc_validate(cp + 2, &plen, &inoff) != -1) {
+				to->to_flags |= TOF_INSPC;
+				tcp_dooptions(to, cp + 9, inoff * 4, flags);
+				*tlen = plen;
+				*drop_hdrlen = *drop_hdrlen + 9 + inoff * 4;
+
+				if (tp != NULL)
+					tp->t_flags2 |= TF2_INSPC;
+			}
+		}
+	} else if (tp != NULL && tp->t_flags2 & TF2_INSPC) {
+		if (plen >= sizeof(uint32_t) && tcp_inspc_validate(cp,
+		    &plen, &inoff) != -1) {
+			tcp_dooptions(to, cp + 4, inoff * 4, flags);
+			*tlen = plen;
+			*drop_hdrlen = *drop_hdrlen + 4 + inoff * 4;
 		}
 	}
 }
