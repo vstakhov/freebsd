@@ -228,7 +228,7 @@ VNET_DEFINE(struct inpcbinfo, tcbinfo);
 static void	 tcp_dooptions(struct tcpopt *, u_char *, int, int);
 static void	 tcp_do_segment(struct mbuf *, struct tcphdr *,
 		     struct socket *, struct tcpcb *, int, int, uint8_t,
-		     int);
+		     int, struct tcpopt *);
 static void	 tcp_dropwithreset(struct mbuf *, struct tcphdr *,
 		     struct tcpcb *, int, int);
 static void	 tcp_pulloutofband(struct socket *,
@@ -1178,7 +1178,7 @@ relocked:
 			 * the mbuf chain and unlocks the inpcb.
 			 */
 			tcp_do_segment(m, th, so, tp, drop_hdrlen, tlen,
-			    iptos, ti_locked);
+			    iptos, ti_locked, &to);
 			INP_INFO_UNLOCK_ASSERT(&V_tcbinfo);
 			return (IPPROTO_DONE);
 		}
@@ -1418,11 +1418,16 @@ relocked:
 	TCP_PROBE5(receive, NULL, tp, mtod(m, const char *), tp, th);
 
 	/*
+	 * Parse options on any incoming segment.
+	 */
+	tcp_dooptions(&to, optp, optlen, (thflags & TH_SYN) ? TO_SYN : 0);
+
+	/*
 	 * Segment belongs to a connection in SYN_SENT, ESTABLISHED or later
 	 * state.  tcp_do_segment() always consumes the mbuf chain, unlocks
 	 * the inpcb, and unlocks pcbinfo.
 	 */
-	tcp_do_segment(m, th, so, tp, drop_hdrlen, tlen, iptos, ti_locked);
+	tcp_do_segment(m, th, so, tp, drop_hdrlen, tlen, iptos, ti_locked, &to);
 	INP_INFO_UNLOCK_ASSERT(&V_tcbinfo);
 	return (IPPROTO_DONE);
 
@@ -1480,7 +1485,7 @@ drop:
 static void
 tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
     struct tcpcb *tp, int drop_hdrlen, int tlen, uint8_t iptos,
-    int ti_locked)
+    int ti_locked, struct tcpopt *to)
 {
 	int thflags, acked, ourfinisacked, needoutput = 0;
 	int rstreason, todrop, win;
@@ -1488,7 +1493,6 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	char *s;
 	struct in_conninfo *inc;
 	struct mbuf *mfree;
-	struct tcpopt to;
 
 #ifdef TCPDEBUG
 	/*
@@ -1576,35 +1580,28 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	}
 
 	/*
-	 * Parse options on any incoming segment.
-	 */
-	tcp_dooptions(&to, (u_char *)(th + 1),
-	    (th->th_off << 2) - sizeof(struct tcphdr),
-	    (thflags & TH_SYN) ? TO_SYN : 0);
-
-	/*
 	 * If echoed timestamp is later than the current time,
 	 * fall back to non RFC1323 RTT calculation.  Normalize
 	 * timestamp if syncookies were used when this connection
 	 * was established.
 	 */
-	if ((to.to_flags & TOF_TS) && (to.to_tsecr != 0)) {
-		to.to_tsecr -= tp->ts_offset;
-		if (TSTMP_GT(to.to_tsecr, tcp_ts_getticks()))
-			to.to_tsecr = 0;
+	if ((to->to_flags & TOF_TS) && (to->to_tsecr != 0)) {
+		to->to_tsecr -= tp->ts_offset;
+		if (TSTMP_GT(to->to_tsecr, tcp_ts_getticks()))
+			to->to_tsecr = 0;
 	}
 	/*
 	 * If timestamps were negotiated during SYN/ACK they should
 	 * appear on every segment during this session and vice versa.
 	 */
-	if ((tp->t_flags & TF_RCVD_TSTMP) && !(to.to_flags & TOF_TS)) {
+	if ((tp->t_flags & TF_RCVD_TSTMP) && !(to->to_flags & TOF_TS)) {
 		if ((s = tcp_log_addrs(inc, th, NULL, NULL))) {
 			log(LOG_DEBUG, "%s; %s: Timestamp missing, "
 			    "no action\n", s, __func__);
 			free(s, M_TCPLOG);
 		}
 	}
-	if (!(tp->t_flags & TF_RCVD_TSTMP) && (to.to_flags & TOF_TS)) {
+	if (!(tp->t_flags & TF_RCVD_TSTMP) && (to->to_flags & TOF_TS)) {
 		if ((s = tcp_log_addrs(inc, th, NULL, NULL))) {
 			log(LOG_DEBUG, "%s; %s: Timestamp not expected, "
 			    "no action\n", s, __func__);
@@ -1620,25 +1617,25 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	 * XXX this is traditional behavior, may need to be cleaned up.
 	 */
 	if (tp->t_state == TCPS_SYN_SENT && (thflags & TH_SYN)) {
-		if ((to.to_flags & TOF_SCALE) &&
+		if ((to->to_flags & TOF_SCALE) &&
 		    (tp->t_flags & TF_REQ_SCALE)) {
 			tp->t_flags |= TF_RCVD_SCALE;
-			tp->snd_scale = to.to_wscale;
+			tp->snd_scale = to->to_wscale;
 		}
 		/*
 		 * Initial send window.  It will be updated with
 		 * the next incoming segment to the scaled value.
 		 */
 		tp->snd_wnd = th->th_win;
-		if (to.to_flags & TOF_TS) {
+		if (to->to_flags & TOF_TS) {
 			tp->t_flags |= TF_RCVD_TSTMP;
-			tp->ts_recent = to.to_tsval;
+			tp->ts_recent = to->to_tsval;
 			tp->ts_recent_age = tcp_ts_getticks();
 		}
-		if (to.to_flags & TOF_MSS)
-			tcp_mss(tp, to.to_mss);
+		if (to->to_flags & TOF_MSS)
+			tcp_mss(tp, to->to_mss);
 		if ((tp->t_flags & TF_SACK_PERMIT) &&
-		    (to.to_flags & TOF_SACKPERM) == 0)
+		    (to->to_flags & TOF_SACKPERM) == 0)
 			tp->t_flags &= ~TF_SACK_PERMIT;
 	}
 
@@ -1665,8 +1662,8 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	    tp->snd_nxt == tp->snd_max &&
 	    tiwin && tiwin == tp->snd_wnd && 
 	    ((tp->t_flags & (TF_NEEDSYN|TF_NEEDFIN)) == 0) &&
-	    tp->t_segq == NULL && ((to.to_flags & TOF_TS) == 0 ||
-	     TSTMP_GEQ(to.to_tsval, tp->ts_recent)) ) {
+	    tp->t_segq == NULL && ((to->to_flags & TOF_TS) == 0 ||
+	     TSTMP_GEQ(to->to_tsval, tp->ts_recent)) ) {
 
 		/*
 		 * If last ACK falls within this segment's sequence numbers,
@@ -1674,17 +1671,17 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		 * NOTE that the test is modified according to the latest
 		 * proposal of the tcplw@cray.com list (Braden 1993/04/26).
 		 */
-		if ((to.to_flags & TOF_TS) != 0 &&
+		if ((to->to_flags & TOF_TS) != 0 &&
 		    SEQ_LEQ(th->th_seq, tp->last_ack_sent)) {
 			tp->ts_recent_age = tcp_ts_getticks();
-			tp->ts_recent = to.to_tsval;
+			tp->ts_recent = to->to_tsval;
 		}
 
 		if (tlen == 0) {
 			if (SEQ_GT(th->th_ack, tp->snd_una) &&
 			    SEQ_LEQ(th->th_ack, tp->snd_max) &&
 			    !IN_RECOVERY(tp->t_flags) &&
-			    (to.to_flags & TOF_SACK) == 0 &&
+			    (to->to_flags & TOF_SACK) == 0 &&
 			    TAILQ_EMPTY(&tp->snd_holes)) {
 				/*
 				 * This is a pure ack for outstanding data.
@@ -1712,11 +1709,11 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 				 * timestamps of 0 or we could calculate a
 				 * huge RTT and blow up the retransmit timer.
 				 */
-				if ((to.to_flags & TOF_TS) != 0 &&
-				    to.to_tsecr) {
+				if ((to->to_flags & TOF_TS) != 0 &&
+				    to->to_tsecr) {
 					u_int t;
 
-					t = tcp_ts_getticks() - to.to_tsecr;
+					t = tcp_ts_getticks() - to->to_tsecr;
 					if (!tp->t_rttlow || tp->t_rttlow > t)
 						tp->t_rttlow = t;
 					tcp_xmit_timer(tp,
@@ -1732,7 +1729,7 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 				acked = BYTES_THIS_ACK(tp, th);
 
 				/* Run HHOOK_TCP_ESTABLISHED_IN helper hooks. */
-				hhook_run_tcp_est_in(tp, th, &to);
+				hhook_run_tcp_est_in(tp, th, to);
 
 				TCPSTAT_INC(tcps_rcvackpack);
 				TCPSTAT_ADD(tcps_rcvackbyte, acked);
@@ -1856,10 +1853,10 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		 * the buffer to better manage the socket buffer resources.
 		 */
 			if (V_tcp_do_autorcvbuf &&
-			    to.to_tsecr &&
+			    to->to_tsecr &&
 			    (so->so_rcv.sb_flags & SB_AUTOSIZE)) {
-				if (TSTMP_GT(to.to_tsecr, tp->rfbuf_ts) &&
-				    to.to_tsecr - tp->rfbuf_ts < hz) {
+				if (TSTMP_GT(to->to_tsecr, tp->rfbuf_ts) &&
+				    to->to_tsecr - tp->rfbuf_ts < hz) {
 					if (tp->rfbuf_cnt >
 					    (so->so_rcv.sb_hiwat / 8 * 7) &&
 					    so->so_rcv.sb_hiwat <
@@ -2172,8 +2169,8 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	 * RFC 1323 PAWS: If we have a timestamp reply on this segment
 	 * and it's less than ts_recent, drop it.
 	 */
-	if ((to.to_flags & TOF_TS) != 0 && tp->ts_recent &&
-	    TSTMP_LT(to.to_tsval, tp->ts_recent)) {
+	if ((to->to_flags & TOF_TS) != 0 && tp->ts_recent &&
+	    TSTMP_LT(to->to_tsval, tp->ts_recent)) {
 
 		/* Check to see if ts_recent is over 24 days old.  */
 		if (tcp_ts_getticks() - tp->ts_recent_age > TCP_PAWS_IDLE) {
@@ -2326,12 +2323,12 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	 *    Vol. 2 p.869. In such cases, we can still calculate the
 	 *    RTT correctly when RCV.NXT == Last.ACK.Sent.
 	 */
-	if ((to.to_flags & TOF_TS) != 0 &&
+	if ((to->to_flags & TOF_TS) != 0 &&
 	    SEQ_LEQ(th->th_seq, tp->last_ack_sent) &&
 	    SEQ_LEQ(tp->last_ack_sent, th->th_seq + tlen +
 		((thflags & (TH_SYN|TH_FIN)) != 0))) {
 		tp->ts_recent_age = tcp_ts_getticks();
-		tp->ts_recent = to.to_tsval;
+		tp->ts_recent = to->to_tsval;
 	}
 
 	/*
@@ -2414,12 +2411,12 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 			goto dropafterack;
 		}
 		if ((tp->t_flags & TF_SACK_PERMIT) &&
-		    ((to.to_flags & TOF_SACK) ||
+		    ((to->to_flags & TOF_SACK) ||
 		     !TAILQ_EMPTY(&tp->snd_holes)))
-			tcp_sack_doack(tp, &to, th->th_ack);
+			tcp_sack_doack(tp, to, th->th_ack);
 
 		/* Run HHOOK_TCP_ESTABLISHED_IN helper hooks. */
-		hhook_run_tcp_est_in(tp, th, &to);
+		hhook_run_tcp_est_in(tp, th, to);
 
 		if (SEQ_LEQ(th->th_ack, tp->snd_una)) {
 			if (tlen == 0 && tiwin == tp->snd_wnd) {
@@ -2656,10 +2653,10 @@ process_ACK:
 		 * timestamps of 0 or we could calculate a
 		 * huge RTT and blow up the retransmit timer.
 		 */
-		if ((to.to_flags & TOF_TS) != 0 && to.to_tsecr) {
+		if ((to->to_flags & TOF_TS) != 0 && to->to_tsecr) {
 			u_int t;
 
-			t = tcp_ts_getticks() - to.to_tsecr;
+			t = tcp_ts_getticks() - to->to_tsecr;
 			if (!tp->t_rttlow || tp->t_rttlow > t)
 				tp->t_rttlow = t;
 			tcp_xmit_timer(tp, TCP_TS_TO_TICKS(t) + 1);
