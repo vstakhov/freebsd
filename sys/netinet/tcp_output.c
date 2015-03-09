@@ -721,6 +721,9 @@ send:
 			to.to_wscale = tp->request_r_scale;
 			to.to_flags |= TOF_SCALE;
 		}
+		/* Inner space options */
+		if ((flags & TH_SYN) && (tp->t_flags2 & TF2_INSPC))
+			to.to_flags |= TOF_INSPC;
 		/* Timestamps. */
 		if ((tp->t_flags & TF_RCVD_TSTMP) ||
 		    ((flags & TH_SYN) && (tp->t_flags & TF_REQ_TSTMP))) {
