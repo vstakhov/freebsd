@@ -385,8 +385,8 @@ struct tcptw {
 /*
  * Inner Space magic constants
  */
-#define	TCP_INSPC_MAGICA	0x7f38	/* XXX: non standard */
-#define	TCP_INSPC_MAGICB	0x2801	/* XXX: non standard */
+#define	TCP_INSPC_MAGICA	0x28017f38	/* XXX: non standard */
+#define	TCP_INSPC_MAGICB	0x1f51		/* XXX: non standard */
 
 /*
  * The initial retransmission should happen at rtt + 4 * rttvar.

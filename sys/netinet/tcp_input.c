@@ -3307,7 +3307,8 @@ tcp_doinspc(struct tcpopt *to, u_char *cp, struct tcpcb *tp, int *tlen,
     int *drop_hdrlen, int flags)
 {
 	int plen, inoff;
-	uint16_t m1, m2;
+	uint32_t m1;
+	uint16_t m2;
 
 	plen = *tlen;
 	
@@ -3319,17 +3320,17 @@ tcp_doinspc(struct tcpopt *to, u_char *cp, struct tcpcb *tp, int *tlen,
 		/* Parse SYN type of InnerSpace option */
 		if (plen >= sizeof(uint32_t) * 3) {
 			/* Validate magic A and magic B */
-			bcopy(cp, &m1, sizeof(uint16_t));
-			bcopy(cp + 6, &m2, sizeof(uint16_t));
-			m1 = ntohs(m1);
+			bcopy(cp, &m1, sizeof(m1));
+			bcopy(cp + 8, &m2, sizeof(m2));
+			m1 = ntohl(m1);
 			m2 = ntohs(m2);
 
 			if (m1 == TCP_INSPC_MAGICA && m2 == TCP_INSPC_MAGICB &&
-			    tcp_inspc_validate(cp + 2, &plen, &inoff) != -1) {
+			    tcp_inspc_validate(cp + 4, &plen, &inoff) != -1) {
 				to->to_flags |= TOF_INSPC;
-				tcp_dooptions(to, cp + 9, inoff * 4, flags);
+				tcp_dooptions(to, cp + 12, inoff * 4, flags);
 				*tlen = plen;
-				*drop_hdrlen = *drop_hdrlen + 9 + inoff * 4;
+				*drop_hdrlen = *drop_hdrlen + 12 + inoff * 4;
 
 				if (tp != NULL)
 					tp->t_flags2 |= TF2_INSPC;
@@ -3338,6 +3339,8 @@ tcp_doinspc(struct tcpopt *to, u_char *cp, struct tcpcb *tp, int *tlen,
 	} else if (tp != NULL && tp->t_flags2 & TF2_INSPC) {
 		if (plen >= sizeof(uint32_t) && tcp_inspc_validate(cp,
 		    &plen, &inoff) != -1) {
+			/* XXX: no support of long option here */
+			/* XXX: no ZOMBI encoding */
 			tcp_dooptions(to, cp + 4, inoff * 4, flags);
 			*tlen = plen;
 			*drop_hdrlen = *drop_hdrlen + 4 + inoff * 4;
